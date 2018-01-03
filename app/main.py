@@ -1,7 +1,8 @@
-# encoding = UTF-8
+# -*- encoding:UTF-8 -*-
 
 import sys
 import json
+import uuid
 from pyspark import SparkConf
 from pyspark import  SparkContext
 from operator import add
@@ -9,6 +10,8 @@ from pyspark.streaming import StreamingContext
 from pyspark.streaming.kafka import KafkaUtils, TopicAndPartition
 import time
 from kafka import KafkaProducer
+
+from CassandraDAO import CassandraDAO,CassandraType
 
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
@@ -138,51 +141,37 @@ def saveToCassandra(sc, ssc, rowRdd):
 
         wordsDataFrame.show()
 
-        #SqlContext = SQLContext(sc)
-
-        #df = SqlContext.read\
-            #.format('org.apache.spark.sql.cassandra')\
-            #.options(table=cassandra_table, keyspace=cassandra_keyspace)\
-            #.load()
-
-        #df.show()
-
-        wordsDataFrame.write\
-            .format('org.apache.spark.sql.cassandra')\
-            .mode('append')\
-            .options(table=cassandra_table, keyspace=cassandra_keyspace)\
-            .save()
+        c_dao.saveToCassandraDF(wordsDataFrame, cassandra_keyspace, cassandra_table, 'append')
 
     except Exception,ee2:
-        HandleError(rowRdd)
+        HandleError(rowRdd, str(ee2))
         print(ee2)
     finally:
         pass
 
 
-def HandleError(rowRdd):
+def HandleError(rowRdd, exception_msg):
     try:
         print('================================handle error ================================')
 
-        #Convert pyspark.RDD -> list
-
+        record_id = str(uuid.uuid4())
         lstRowRdd = rowRdd.collect()
+        cqllist=[]
 
         if lstRowRdd > 0:
-            url=kafka_handling_api+'/input_error_msg'
-
 
             for iRowRdd in lstRowRdd:
-                    input_data = str(iRowRdd[2])
-                    print('call ' + url + '')
-                    print('topic='+topic+', input_data='+ input_data)
-                    params = {
-                        'topic':topic,
-                        'input_data':input_data
-                    }
-                    response=requests.post(url,json=params)
-                    print('result:' + str(response.status_code))
-                    print(response.text)
+                input_data = str(iRowRdd[2])  #.encode('utf-8')
+                print(type(input_data))
+                print(input_data.encode('utf-8'))
+                exception_msg2 = exception_msg.replace("'","''")
+                cql_command = "insert into "+ cassandra_keyspace +".spark_streaming_error_log (random_id, topic, message, create_date, remark, processed) VALUES ('"+ record_id +"', '"+ topic +"', '"+ input_data +"', '"+ (str(datetime.now())) +"' ,'"+ exception_msg2 +"', 'N')"
+                cqllist.append(cql_command)
+
+            print('let''s print cqllist')
+            print(cqllist)
+            c_dao.BatchInsertIntoCassandra(cqllist, cassandra_keyspace)
+            #session.execute(batch)
         else:
             pass
 
@@ -200,6 +189,7 @@ def main():
     global kafka_handling_api
     global seconds_per_job
     global topic
+    global c_dao
 
     zookeeper_IP=GetConfig('zookeeper_IP')
     cassandra_IP =GetConfig('cassandra_IP')
@@ -208,13 +198,12 @@ def main():
     kafka_handling_api=GetConfig('kafka_handling_api')
     seconds_per_job=GetConfig('seconds_per_job')
     topic=GetConfig('topic')
+    c_dao = CassandraDAO(CassandraType.PRODUCTION)
 
     sc = CreateSparkContext(cassandra_IP)
     ssc = StreamingContext(sc, int(float(seconds_per_job)))
 
     try:
-
-        handlingPreviousMsg()
 
         kafka_stream = KafkaUtils.createStream(ssc, zookeeper_IP, 'spark-streaming-consumer', {topic:12})
         raw = kafka_stream.flatMap(lambda kafkaS: [kafkaS])
